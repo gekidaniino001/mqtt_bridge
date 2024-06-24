@@ -1,0 +1,280 @@
+diff --git a/autoware/src/vehicle/external/mqtt_bridge/launch/demo.launch.py b/autoware/src/vehicle/external/mqtt_bridge/launch/demo.launch.py
+index 846aa10c..ece48305 100644
+--- a/autoware/src/vehicle/external/mqtt_bridge/launch/demo.launch.py
++++ b/autoware/src/vehicle/external/mqtt_bridge/launch/demo.launch.py
+@@ -6,15 +6,14 @@ from launch_ros.actions import Node
+ 
+ def generate_launch_description():
+     ld = LaunchDescription()
+-    # config = os.path.join(
+-    #     get_package_share_directory("mqtt_bridge"), "config", "demo_params.yaml"
+-    # )
++
+     config = os.path.join(
+-        get_package_share_directory("mqtt_bridge"), "config", "params.yaml"
++        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", "params.yaml"
+     )
+     config1 = os.path.join(
+-        get_package_share_directory("mqtt_bridge"), "config", "tls_params.yaml"
++        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", "tls_params.yaml"
+     )
++
+     node = Node(
+         package="mqtt_bridge",
+         name="mqtt_bridge_node",
+diff --git a/autoware/src/vehicle/external/mqtt_bridge/launch/pana.launch.py b/autoware/src/vehicle/external/mqtt_bridge/launch/pana.launch.py
+new file mode 100644
+index 00000000..36b3b903
+--- /dev/null
++++ b/autoware/src/vehicle/external/mqtt_bridge/launch/pana.launch.py
+@@ -0,0 +1,25 @@
++import os
++from ament_index_python.packages import get_package_share_directory
++from launch import LaunchDescription
++from launch_ros.actions import Node
++
++
++def generate_launch_description():
++    ld = LaunchDescription()
++
++    config = os.path.join(
++        os.environ["DATA_TEXT_DIR"], "config", "pana_mqtt_config", "params.yaml"
++    )
++    config1 = os.path.join(
++        os.environ["DATA_TEXT_DIR"], "config", "pana_mqtt_config", "tls_params.yaml"
++    )
++
++
++    node = Node(
++        package="mqtt_bridge",
++        name="pana_mqtt_bridge_node",
++        executable="mqtt_bridge_node",
++        parameters=[config, config1],
++    )
++    ld.add_action(node)
++    return ld
+diff --git a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/app.py b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/app.py
+index bb70a25d..985b7282 100644
+--- a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/app.py
++++ b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/app.py
+@@ -6,8 +6,8 @@ from rclpy.node import Node
+ from .bridge import create_bridge
+ from .mqtt_client import create_private_path_extractor
+ from .util import lookup_object
+-
+-import dbg,threading
++from std_msgs.msg import String
++import dbg,threading,time,datetime
+ 
+ 
+ def create_config(mqtt_client, serializer, deserializer, mqtt_private_path):
+@@ -26,6 +26,43 @@ def create_config(mqtt_client, serializer, deserializer, mqtt_private_path):
+     return config
+ 
+ 
++class MqttNode(Node):
++    def __init__(self):
++        super().__init__("mqtt_bridge_node",
++            allow_undeclared_parameters=True,
++            automatically_declare_parameters_from_overrides=True,)
++        self.prev_hb = False
++        self.mims_hb_sub = self.create_subscription(String, "/hb_mims", self.cb_hb_mims, 1)
++        timer_period = 3.00  # 秒
++        self.timer = self.create_timer(timer_period, self.timer_cb)  # 指定間隔でcbを呼び出す
++
++    def cb_hb_mims(self, msg):
++        # payload = eval(msg.data)
++        # s_format = '%Y-%m-%d %H:%M:%S.%f'
++        # dt = datetime.datetime.strptime(payload["timestamp"], s_format)
++        # self.prev_hb = dt
++        self.prev_hb = datetime.datetime.fromtimestamp(time.time())
++
++    def timer_cb(self):
++        global mqtt_client
++        if self.prev_hb:
++            if (datetime.datetime.fromtimestamp(time.time()) - self.prev_hb).seconds < 5:
++                self.get_logger().info("---OK---")
++                # pass
++            else:
++                self.get_logger().info("NG..")
++                self.prev_hb = False
++                mqtt_client.disconnect()
++                mqtt_client.loop_stop()
++                mqtt_client._thread_terminate = True
++                if threading.current_thread() != mqtt_client._thread:
++                    mqtt_client._thread.join()
++                    mqtt_client._thread = None
++                mqtt_client = None
++                # inject.clear()
++                # mqtt_node.destroy_node()
++                mqtt_bridge_node(spin=False)
++
+ def mqtt_bridge_node(spin=True):
+     """_summary_
+     mqtt_bridge_nodeを生成する。
+@@ -35,11 +72,7 @@ def mqtt_bridge_node(spin=True):
+     global mqtt_node
+     
+     if spin:
+-        mqtt_node = Node(
+-            "mqtt_bridge_node",
+-            allow_undeclared_parameters=True,
+-            automatically_declare_parameters_from_overrides=True,
+-        )
++        mqtt_node = MqttNode()
+ 
+     # load bridge parameters
+     bridge_dict_keys = ["factory", "msg_type", "topic_from", "topic_to"]
+@@ -69,10 +102,10 @@ def mqtt_bridge_node(spin=True):
+     # host: a4vg4r4w8fz62-ats.iot.ap-northeast-1.amazonaws.com
+     # keepalive: 60
+     # port: 8883
+-    # mqtt_node.get_logger().info("------------------------")
+-    # mqtt_node.get_logger().info(str(mqtt_params))
+-    # mqtt_node.get_logger().info("------------------------")
+-    # mqtt_node.get_logger().info(str(conn_params["host"]))
++    mqtt_node.get_logger().info("------------------------")
++    mqtt_node.get_logger().info(str(mqtt_params))
++    mqtt_node.get_logger().info("------------------------")
++    mqtt_node.get_logger().info(str(conn_params["host"]))
+ 
+     for key in conn_params.keys():
+         conn_params.update({key: conn_params[key].value})
+@@ -95,20 +128,32 @@ def mqtt_bridge_node(spin=True):
+ 
+     # dependency injection
+     config = create_config(mqtt_client, serializer, deserializer, mqtt_private_path)
++    if not spin:
++         inject.clear()
+     inject.configure(config)
+ 
+     # configure and connect to MQTT broker
+     mqtt_client.on_connect = _on_connect
+     mqtt_client.on_disconnect = _on_disconnect
+ 
+-    mqtt_client.connect(**conn_params)
+-
+-    # configure bridges
++    connect_flg = False
++    while not connect_flg:
++        try:
++            mqtt_client.connect(**conn_params)
++            connect_flg = True
++        except:
++            mqtt_node.get_logger().info("wait connect...")
++            time.sleep(1)
++    global bridges
+     bridges = []
+     for bridge_args in bridge_params:
++        if not spin and bridge_args["factory"] == "mqtt_bridge.bridge:RosToMqttBridge":
++            continue
++        # mqtt_node.get_logger().info(str(bridge_args))
+         bridges.append(create_bridge(**bridge_args, ros_node=mqtt_node))
+ 
+     # start MQTT loop
++    mqtt_node.get_logger().info(str(mqtt_client._sock))
+     mqtt_client.loop_start()
+ 
+     if spin:
+@@ -123,7 +168,12 @@ def mqtt_bridge_node(spin=True):
+ 
+ 
+ def _on_connect(client, userdata, flags, response_code):
+-    mqtt_node.get_logger().info("MQTT connected")
++
++    mqtt_node.get_logger().info("MQTT connected!")
++    # mqtt_node.get_logger().info(str(client._sock))
++    # mqtt_node.get_logger().info(str(userdata))
++    # mqtt_node.get_logger().info(str(flags))
++    # mqtt_node.get_logger().info(str(response_code))
+ 
+ 
+ def _on_disconnect(client, userdata, response_code):
+@@ -131,12 +181,19 @@ def _on_disconnect(client, userdata, response_code):
+     mqtt_node.get_logger().info("retry...")
+     client.disconnect() 
+     client.loop_stop()
++    client._thread_terminate = True
+     if threading.current_thread() != client._thread:
+         client._thread.join()
+         client._thread = None
+     client = None
+-    inject.clear()
++    # inject.clear()
+     # mqtt_node.destroy_node()
+     mqtt_bridge_node(spin=False)
+ 
+ __all__ = ["mqtt_bridge_node"]
++
++
++# <ssl.SSLSocket fd=10, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=6, laddr=('192.168.11.160', 36807), raddr=('54.65.4.57', 8883)>
++
++# <ssl.SSLSocket fd=10, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=6, laddr=('192.168.11.160', 58523), raddr=('3.113.90.235', 8883)>
++# <ssl.SSLSocket fd=11, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=6, laddr=('192.168.11.160', 59419), raddr=('35.73.203.233', 8883)>
+diff --git a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/bridge.py b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/bridge.py
+index ed0e5064..bd13c8c6 100644
+--- a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/bridge.py
++++ b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/bridge.py
+@@ -97,12 +97,12 @@ class RosToMqttBridge(Bridge):
+             if frequency is None
+             else Duration(seconds=(1.0 / frequency))
+         )
+-        self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 10)
++        self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
+ 
+     def _callback_ros(self, msg):
+-        self.ros_node.get_logger().info(
+-            "ROS received from {}".format(self._topic_from)
+-        )
++        # self.ros_node.get_logger().info(
++        #     "ROS received from {}".format(self._topic_from)
++        # )
+         now = self.ros_node.get_clock().now()
+         if now - self._last_published >= self._interval:
+             self._publish(msg)
+@@ -153,11 +153,12 @@ class MqttToRosBridge(Bridge):
+         self, client: mqtt.Client, userdata: Dict, mqtt_msg: mqtt.MQTTMessage
+     ):
+         """callback from MQTT"""
+-        self.ros_node.get_logger().info("MQTT received from {}".format(mqtt_msg.topic))
++        # self.ros_node.get_logger().info("MQTT received from {}".format(mqtt_msg.topic))
+         now = self.ros_node.get_clock().now()
+ 
+         if self._interval is None or now - self._last_published >= self._interval:
+             try:
++
+                 ros_msg = self._create_ros_message(mqtt_msg)
+                 self._publisher.publish(ros_msg)
+                 self._last_published = now
+@@ -171,6 +172,13 @@ class MqttToRosBridge(Bridge):
+             msg_dict = self._deserialize(mqtt_msg.payload, raw=False)
+         else:
+             msg_dict = self._deserialize(mqtt_msg.payload)
++
++
++        if "data" not in msg_dict:
++            msg_dict_ = {}
++            msg_dict_["data"] = str(msg_dict)
++            return populate_instance(msg_dict_, self._msg_type())
++
+         return populate_instance(msg_dict, self._msg_type())
+ 
+ 
+diff --git a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/mqtt_client.py b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/mqtt_client.py
+index e06b3c50..f5be9970 100644
+--- a/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/mqtt_client.py
++++ b/autoware/src/vehicle/external/mqtt_bridge/mqtt_bridge/mqtt_client.py
+@@ -7,10 +7,11 @@ from ament_index_python.packages import get_package_share_directory
+ 
+ 
+ def prepend_string_to_dict_values(dictionary):
++
+     for key in dictionary:
+         dictionary[key] = os.path.join(
+-            get_package_share_directory("mqtt_bridge"), "config", dictionary[key]
+-        )
++        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", dictionary[key]
++    )
+     return dictionary
+ 
+ 
