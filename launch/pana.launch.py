@@ -8,15 +8,16 @@ def generate_launch_description():
     ld = LaunchDescription()
 
     config = os.path.join(
-        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", "params.yaml"
+        os.environ["DATA_TEXT_DIR"], "config", "pana_mqtt_config", "params.yaml"
     )
     config1 = os.path.join(
-        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", "tls_params.yaml"
+        os.environ["DATA_TEXT_DIR"], "config", "pana_mqtt_config", "tls_params.yaml"
     )
+
 
     node = Node(
         package="mqtt_bridge",
-        name="mqtt_bridge_node",
+        name="pana_mqtt_bridge_node",
         executable="mqtt_bridge_node",
         parameters=[config, config1],
     )
