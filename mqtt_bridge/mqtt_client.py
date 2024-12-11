@@ -10,7 +10,7 @@ def prepend_string_to_dict_values(dictionary):
 
     for key in dictionary:
         dictionary[key] = os.path.join(
-        os.environ["DATA_TEXT_DIR"], "config", "mqtt_config", dictionary[key]
+        os.environ["CONFIG_DIR"], "mqtt_config", dictionary[key]
     )
     return dictionary
 
