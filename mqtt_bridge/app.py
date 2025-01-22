@@ -146,6 +146,7 @@ def mqtt_bridge_node(spin=True):
             time.sleep(1)
     global bridges
     bridges = []
+    time.sleep(1)
     for bridge_args in bridge_params:
         if not spin and bridge_args["factory"] == "mqtt_bridge.bridge:RosToMqttBridge":
             continue
