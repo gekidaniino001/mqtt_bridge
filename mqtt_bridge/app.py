@@ -52,15 +52,14 @@ class MqttNode(Node):
             else:
                 self.get_logger().info("NG..")
                 self.prev_hb = False
-                mqtt_client.disconnect()
+
+                if mqtt_client.is_connected():
+                    mqtt_client.disconnect()
+
                 mqtt_client.loop_stop()
-                mqtt_client._thread_terminate = True
-                if threading.current_thread() != mqtt_client._thread:
-                    mqtt_client._thread.join()
-                    mqtt_client._thread = None
                 mqtt_client = None
-                # inject.clear()
-                # mqtt_node.destroy_node()
+
+                # MQTT再初期化（再接続）
                 mqtt_bridge_node(spin=False)
 
 def mqtt_bridge_node(spin=True):
