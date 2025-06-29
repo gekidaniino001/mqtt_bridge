@@ -97,7 +97,7 @@ class RosToMqttBridge(Bridge):
             if frequency is None
             else Duration(seconds=(1.0 / frequency))
         )
-        self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
+        self._subscription = self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
 
     def cleanup(self):
         self.ros_node.get_logger().info(f"Cleaning up RosToMqttBridge for topic '{self._topic_from}'")
