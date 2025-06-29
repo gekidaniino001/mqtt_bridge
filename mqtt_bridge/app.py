@@ -217,6 +217,7 @@ def _on_connect(client, userdata, flags, response_code):
 
 
 def _on_disconnect(client, userdata, response_code):
+    mqtt_node.get_logger().warn(f"MQTT disconnected! code={response_code}")
     pass 
     # mqtt_node.get_logger().info("MQTT disconnected")
     # mqtt_node.get_logger().info("retry...")
