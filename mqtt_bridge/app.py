@@ -58,6 +58,7 @@ class MqttNode(Node):
                     self.get_logger().warn(f"Disconnect error: {e}")
 
                 try:
+                    mqtt_client._thread_terminate = True
                     mqtt_client.loop_stop()
                 except Exception as e:
                     self.get_logger().warn(f"Loop stop error: {e}")
@@ -216,6 +217,7 @@ def _on_disconnect(client, userdata, response_code):
 
     # MQTTループ停止（v1.5では join() されない）
     try:
+        mqtt_client._thread_terminate = True
         client.loop_stop()
     except Exception as e:
         mqtt_node.get_logger().warn(f"Loop stop error: {e}")
