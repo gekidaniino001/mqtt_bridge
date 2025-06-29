@@ -54,7 +54,7 @@ class MqttNode(Node):
             if (datetime.datetime.fromtimestamp(time.time()) - self.prev_hb).seconds < 5:
                 self.get_logger().info("---OK---")
                 # pass
-            elif ( time.time() - self.prev_reconnect ) >= 15:
+            elif ( time.time() - self.prev_reconnect ) >= 5:
                 self.get_logger().warn("Reconnecting MQTT...")
                 self.get_logger().warn(f"last mims_hb is {(datetime.datetime.fromtimestamp(time.time()) - self.prev_hb)} ago")
                 self.reset_bridges('mqtt_to_ros')
@@ -84,6 +84,9 @@ class MqttNode(Node):
                 # MQTT再初期化（再接続）
                 mqtt_bridge_node(spin=False)
                 self.prev_reconnect = time.time()
+            else:
+                self.get_logger().info("---ELSE---")
+                
 
     def add_bridge(self, bridge, mqtt_to_ros=True):
         if mqtt_to_ros:
@@ -160,7 +163,7 @@ def mqtt_bridge_node(spin=True):
     # mqtt_client.default_mqtt_client_factory
     mqtt_client_factory = lookup_object(mqtt_client_factory_name)
     mqtt_client = mqtt_client_factory(mqtt_params)
-    mqtt_client.reconnect_delay_set(min_delay=0, max_delay=0)
+    mqtt_client.reconnect_delay_set(min_delay=60, max_delay=60)
 
     # load serializer and deserializer
     serializer = mqtt_node.get_parameter_or("serializer", "msgpack:dumps")
