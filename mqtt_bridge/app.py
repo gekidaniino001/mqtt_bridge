@@ -51,13 +51,26 @@ class MqttNode(Node):
                 self.get_logger().info("---OK---")
                 # pass
             else:
-                self.get_logger().info("NG..")
-                self.prev_hb = False
+                try:
+                    if mqtt_client.is_connected():
+                        mqtt_client.disconnect()
+                except Exception as e:
+                    self.get_logger().warn(f"Disconnect error: {e}")
 
-                if mqtt_client.is_connected():
-                    mqtt_client.disconnect()
+                try:
+                    mqtt_client.loop_stop()
+                except Exception as e:
+                    self.get_logger().warn(f"Loop stop error: {e}")
 
-                mqtt_client.loop_stop()
+                # v1.5.1対応：threadがまだ動いていたらjoinする
+                thread = getattr(mqtt_client, "_thread", None)
+                if thread and thread.is_alive():
+                    self.get_logger().warn("Joining MQTT thread manually (paho-mqtt 1.5.x fallback)")
+                    try:
+                        thread.join()
+                    except Exception as e:
+                        self.get_logger().warn(f"Join failed: {e}")
+
                 mqtt_client = None
 
                 # MQTT再初期化（再接続）
@@ -193,12 +206,29 @@ def _on_connect(client, userdata, flags, response_code):
 def _on_disconnect(client, userdata, response_code):
     mqtt_node.get_logger().info("MQTT disconnected")
     mqtt_node.get_logger().info("retry...")
-    client.disconnect() 
-    client.loop_stop()
-    client._thread_terminate = True
-    if threading.current_thread() != client._thread:
-        client._thread.join()
-        client._thread = None
+
+    # 切断（既に切れててもOK）
+    try:
+        if client.is_connected():
+            client.disconnect()
+    except Exception as e:
+        mqtt_node.get_logger().warn(f"Disconnect error: {e}")
+
+    # MQTTループ停止（v1.5では join() されない）
+    try:
+        client.loop_stop()
+    except Exception as e:
+        mqtt_node.get_logger().warn(f"Loop stop error: {e}")
+
+    # 明示的に join() を fallback として入れる（v1.5対策）
+    thread = getattr(client, "_thread", None)
+    if thread and thread.is_alive():
+        mqtt_node.get_logger().warn("Joining MQTT thread manually (paho-mqtt 1.5.x fallback)")
+        try:
+            thread.join()
+        except Exception as e:
+            mqtt_node.get_logger().warn(f"Join failed: {e}")
+
     client = None
     # inject.clear()
     # mqtt_node.destroy_node()
