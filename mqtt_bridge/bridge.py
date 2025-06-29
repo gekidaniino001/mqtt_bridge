@@ -99,6 +99,12 @@ class RosToMqttBridge(Bridge):
         )
         self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
 
+    def cleanup(self):
+        """cleanup the bridge"""
+        self.ros_node.get_logger().info("Cleaning up RosToMqttBridge")
+        # Unsubscribe from the ROS topic
+        self.ros_node.destroy_subscription(self._callback_ros)
+
     def _callback_ros(self, msg):
         # self.ros_node.get_logger().info(
         #     "ROS received from {}".format(self._topic_from)
@@ -148,6 +154,12 @@ class MqttToRosBridge(Bridge):
         self._publisher = self.ros_node.create_publisher(
             self._msg_type, self._topic_to, 10
         )  # , queue_size=self._queue_size)
+
+    def cleanup(self):
+        """cleanup the bridge"""
+        self.ros_node.get_logger().info("Cleaning up MqttToRosBridge")
+        # Destroy the ROS publisher
+        self.ros_node.destroy_publisher(self._publisher)
 
     def _callback_mqtt(
         self, client: mqtt.Client, userdata: Dict, mqtt_msg: mqtt.MQTTMessage

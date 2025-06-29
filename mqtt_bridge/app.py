@@ -34,6 +34,7 @@ class MqttNode(Node):
         self.prev_hb = False
         self.mims_hb_sub = self.create_subscription(String, "/hb_mims", self.cb_hb_mims, 1)
         timer_period = 3.00  # 秒
+        self.bridges = []
         self.timer = self.create_timer(timer_period, self.timer_cb)  # 指定間隔でcbを呼び出す
 
     def cb_hb_mims(self, msg):
@@ -61,6 +62,19 @@ class MqttNode(Node):
 
                 # MQTT再初期化（再接続）
                 mqtt_bridge_node(spin=False)
+
+    def add_bridge(self, bridge):
+        self.bridges.append(bridge)
+
+    def get_bridges(self):
+        return self.bridges
+
+    def reset_bridges(self):
+        """ブリッジをリセットする。"""
+        for brdg in self.bridges:
+            brdg.cleanup()
+        self.bridges = []
+
 
 def mqtt_bridge_node(spin=True):
     """_summary_
@@ -143,14 +157,14 @@ def mqtt_bridge_node(spin=True):
         except:
             mqtt_node.get_logger().info("wait connect...")
             time.sleep(1)
-    global bridges
-    bridges = []
+
+    mqtt_node.reset_bridges()
     time.sleep(1)
     for bridge_args in bridge_params:
         if not spin and bridge_args["factory"] == "mqtt_bridge.bridge:RosToMqttBridge":
             continue
         # mqtt_node.get_logger().info(str(bridge_args))
-        bridges.append(create_bridge(**bridge_args, ros_node=mqtt_node))
+        mqtt_node.add_bridge(create_bridge(**bridge_args, ros_node=mqtt_node))
 
     # start MQTT loop
     mqtt_node.get_logger().info(str(mqtt_client._sock))
