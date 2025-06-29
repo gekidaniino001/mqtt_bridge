@@ -160,6 +160,7 @@ def mqtt_bridge_node(spin=True):
     # mqtt_client.default_mqtt_client_factory
     mqtt_client_factory = lookup_object(mqtt_client_factory_name)
     mqtt_client = mqtt_client_factory(mqtt_params)
+    mqtt_client.reconnect_delay_set(min_delay=0, max_delay=0)
 
     # load serializer and deserializer
     serializer = mqtt_node.get_parameter_or("serializer", "msgpack:dumps")
