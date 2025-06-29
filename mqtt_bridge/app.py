@@ -36,6 +36,7 @@ class MqttNode(Node):
         timer_period = 3.00  # 秒
         self.bridges = []
         self.timer = self.create_timer(timer_period, self.timer_cb)  # 指定間隔でcbを呼び出す
+        self.prev_reconnect = -1
 
     def cb_hb_mims(self, msg):
         # payload = eval(msg.data)
@@ -50,7 +51,7 @@ class MqttNode(Node):
             if (datetime.datetime.fromtimestamp(time.time()) - self.prev_hb).seconds < 5:
                 self.get_logger().info("---OK---")
                 # pass
-            else:
+            elif ( time.time() - self.prev_reconnect ) >= 5:
                 try:
                     if mqtt_client.is_connected():
                         mqtt_client.disconnect()
@@ -75,7 +76,12 @@ class MqttNode(Node):
                 mqtt_client = None
 
                 # MQTT再初期化（再接続）
-                mqtt_bridge_node(spin=False)
+                connected = mqtt_bridge_node(spin=False)
+                if connected:
+                    self.get_logger().info("Reconnected to MQTT broker successfully.")
+                    self.prev_reconnect = time.time()
+                else:
+                    self.get_logger().warn("Failed to reconnect to MQTT broker.")
 
     def add_bridge(self, bridge):
         self.bridges.append(bridge)
@@ -193,6 +199,8 @@ def mqtt_bridge_node(spin=True):
             mqtt_client.loop_stop()
 
         mqtt_node.destroy_node()
+    else:
+        return mqtt_client.is_connected()
 
 
 def _on_connect(client, userdata, flags, response_code):
