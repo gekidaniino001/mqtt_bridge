@@ -34,7 +34,12 @@ class MqttNode(Node):
         self.prev_hb = False
         self.mims_hb_sub = self.create_subscription(String, "/hb_mims", self.cb_hb_mims, 1)
         timer_period = 3.00  # 秒
+        self.bridges = {
+            'mqtt_to_ros': [],
+            'ros_to_mqtt': [],
+        }
         self.timer = self.create_timer(timer_period, self.timer_cb)  # 指定間隔でcbを呼び出す
+        self.prev_reconnect = -1
 
     def cb_hb_mims(self, msg):
         # payload = eval(msg.data)
@@ -49,19 +54,56 @@ class MqttNode(Node):
             if (datetime.datetime.fromtimestamp(time.time()) - self.prev_hb).seconds < 5:
                 self.get_logger().info("---OK---")
                 # pass
-            else:
-                self.get_logger().info("NG..")
-                self.prev_hb = False
-                mqtt_client.disconnect()
-                mqtt_client.loop_stop()
-                mqtt_client._thread_terminate = True
-                if threading.current_thread() != mqtt_client._thread:
-                    mqtt_client._thread.join()
-                    mqtt_client._thread = None
+            elif ( time.time() - self.prev_reconnect ) >= 5:
+                self.get_logger().warn("Reconnecting MQTT...")
+                self.get_logger().warn(f"last mims_hb is {(datetime.datetime.fromtimestamp(time.time()) - self.prev_hb)} ago")
+                self.reset_bridges('mqtt_to_ros')
+                try:
+                    if mqtt_client.is_connected():
+                        mqtt_client.disconnect()
+                except Exception as e:
+                    self.get_logger().warn(f"Disconnect error: {e}")
+
+                try:
+                    mqtt_client._thread_terminate = True
+                    mqtt_client.loop_stop()
+                except Exception as e:
+                    self.get_logger().warn(f"Loop stop error: {e}")
+
+                # v1.5.1対応：threadがまだ動いていたらjoinする
+                thread = getattr(mqtt_client, "_thread", None)
+                if thread and thread.is_alive():
+                    self.get_logger().warn("Joining MQTT thread manually (paho-mqtt 1.5.x fallback)")
+                    try:
+                        thread.join()
+                    except Exception as e:
+                        self.get_logger().warn(f"Join failed: {e}")
+
                 mqtt_client = None
-                # inject.clear()
-                # mqtt_node.destroy_node()
+
+                # MQTT再初期化（再接続）
                 mqtt_bridge_node(spin=False)
+                self.prev_reconnect = time.time()
+            else:
+                self.get_logger().info("---ELSE---")
+                
+
+    def add_bridge(self, bridge, mqtt_to_ros=True):
+        if mqtt_to_ros:
+            self.bridges['mqtt_to_ros'].append(bridge)
+        else:
+            self.bridges['ros_to_mqtt'].append(bridge)
+
+    def get_bridges(self):
+        return self.bridges
+
+    def reset_bridges(self, key='mqtt_to_ros'):
+        """ブリッジをリセットする。"""
+        if key not in self.bridges.keys():
+            self.get_logger().warn(f'unknown bridge key: {key}')
+        for brdg in self.bridges[key]:
+            brdg.cleanup()
+        self.bridges[key] = []
 
 def mqtt_bridge_node(spin=True):
     """_summary_
@@ -121,6 +163,7 @@ def mqtt_bridge_node(spin=True):
     # mqtt_client.default_mqtt_client_factory
     mqtt_client_factory = lookup_object(mqtt_client_factory_name)
     mqtt_client = mqtt_client_factory(mqtt_params)
+    mqtt_client.reconnect_delay_set(min_delay=60, max_delay=60)
 
     # load serializer and deserializer
     serializer = mqtt_node.get_parameter_or("serializer", "msgpack:dumps")
@@ -144,14 +187,14 @@ def mqtt_bridge_node(spin=True):
         except:
             mqtt_node.get_logger().info("wait connect...")
             time.sleep(1)
-    global bridges
-    bridges = []
+
     time.sleep(1)
     for bridge_args in bridge_params:
-        if not spin and bridge_args["factory"] == "mqtt_bridge.bridge:RosToMqttBridge":
+        ros_to_mqtt = (bridge_args["factory"] == "mqtt_bridge.bridge:RosToMqttBridge")
+        if not spin and ros_to_mqtt:
             continue
         # mqtt_node.get_logger().info(str(bridge_args))
-        bridges.append(create_bridge(**bridge_args, ros_node=mqtt_node))
+        mqtt_node.add_bridge(create_bridge(**bridge_args, ros_node=mqtt_node), not ros_to_mqtt)
 
     # start MQTT loop
     mqtt_node.get_logger().info(str(mqtt_client._sock))
@@ -178,18 +221,38 @@ def _on_connect(client, userdata, flags, response_code):
 
 
 def _on_disconnect(client, userdata, response_code):
-    mqtt_node.get_logger().info("MQTT disconnected")
-    mqtt_node.get_logger().info("retry...")
-    client.disconnect() 
-    client.loop_stop()
-    client._thread_terminate = True
-    if threading.current_thread() != client._thread:
-        client._thread.join()
-        client._thread = None
-    client = None
+    mqtt_node.get_logger().warn(f"MQTT disconnected! code={response_code}")
+    pass 
+    # mqtt_node.get_logger().info("MQTT disconnected")
+    # mqtt_node.get_logger().info("retry...")
+
+    # # 切断（既に切れててもOK）
+    # try:
+    #     if client.is_connected():
+    #         client.disconnect()
+    # except Exception as e:
+    #     mqtt_node.get_logger().warn(f"Disconnect error: {e}")
+
+    # # MQTTループ停止（v1.5では join() されない）
+    # try:
+    #     mqtt_client._thread_terminate = True
+    #     client.loop_stop()
+    # except Exception as e:
+    #     mqtt_node.get_logger().warn(f"Loop stop error: {e}")
+
+    # # 明示的に join() を fallback として入れる（v1.5対策）
+    # thread = getattr(client, "_thread", None)
+    # if thread and thread.is_alive():
+    #     mqtt_node.get_logger().warn("Joining MQTT thread manually (paho-mqtt 1.5.x fallback)")
+    #     try:
+    #         thread.join()
+    #     except Exception as e:
+    #         mqtt_node.get_logger().warn(f"Join failed: {e}")
+
+    # client = None
     # inject.clear()
     # mqtt_node.destroy_node()
-    mqtt_bridge_node(spin=False)
+    # mqtt_bridge_node(spin=False)
 
 __all__ = ["mqtt_bridge_node"]
 

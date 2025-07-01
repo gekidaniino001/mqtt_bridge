@@ -97,7 +97,16 @@ class RosToMqttBridge(Bridge):
             if frequency is None
             else Duration(seconds=(1.0 / frequency))
         )
-        self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
+        self._subscription = self.ros_node.create_subscription(msg_type, topic_from, self._callback_ros, 1)
+        self.ros_node.get_logger().info(f"Create bridge ( {self._topic_from} -> {self._topic_to} )")
+
+    def cleanup(self):
+        self.ros_node.get_logger().info(f"Cleaning up RosToMqttBridge for topic '{self._topic_from}'")
+        try:
+            self.ros_node.destroy_subscription(self._subscription)
+            self._subscription = None
+        except Exception as e:
+            self.ros_node.get_logger().warn(f"Error while destroying ROS subscription: {e}")
 
     def _callback_ros(self, msg):
         # self.ros_node.get_logger().info(
@@ -148,6 +157,26 @@ class MqttToRosBridge(Bridge):
         self._publisher = self.ros_node.create_publisher(
             self._msg_type, self._topic_to, 10
         )  # , queue_size=self._queue_size)
+        self.ros_node.get_logger().info(f"Create bridge ( {self._topic_from} -> {self._topic_to} )")
+
+    def cleanup(self):
+        """Clean up MQTT-to-ROS bridge resources."""
+        self.ros_node.get_logger().info(f"Cleaning up MqttToRosBridge for topic '{self._topic_from}'")
+
+        # MQTT購読解除とコールバック削除
+        try:
+            self._mqtt_client.unsubscribe(self._topic_from)
+            self._mqtt_client.message_callback_remove(self._topic_from)
+        except Exception as e:
+            self.ros_node.get_logger().warn(f"Error while unsubscribing MQTT topic: {e}")
+
+        # ROS publisherの破棄
+        try:
+            self.ros_node.destroy_publisher(self._publisher)
+        except Exception as e:
+            self.ros_node.get_logger().warn(f"Error while destroying ROS publisher: {e}")
+
+        self._publisher = None
 
     def _callback_mqtt(
         self, client: mqtt.Client, userdata: Dict, mqtt_msg: mqtt.MQTTMessage
