@@ -8,6 +8,7 @@ from .mqtt_client import create_private_path_extractor
 from .util import lookup_object
 from std_msgs.msg import String
 import dbg,threading,time,datetime
+import os,socket,struct,subprocess
 
 
 def create_config(mqtt_client, serializer, deserializer, mqtt_private_path):
@@ -40,6 +41,11 @@ class MqttNode(Node):
         }
         self.timer = self.create_timer(timer_period, self.timer_cb)  # 指定間隔でcbを呼び出す
         self.prev_reconnect = -1
+        self._timer_period = timer_period
+        self._last_timer_ts = None
+        self._last_timer_delay = 0.0
+        self.broker_host = None
+        self.broker_port = None
 
     def cb_hb_mims(self, msg):
         # payload = eval(msg.data)
@@ -48,8 +54,94 @@ class MqttNode(Node):
         # self.prev_hb = dt
         self.prev_hb = datetime.datetime.fromtimestamp(time.time())
 
+    def _get_default_gateway(self):
+        """デフォルトゲートウェイのIPを/proc/net/routeから取得する（ローカル無線/回線の生死確認用）。
+        デフォルトルートが複数存在する場合（例: FS040U/050Wの2経路）、行の並び順はmetric順とは限らないため、
+        metricが最小のルートを実際のデフォルトゲートウェイとして選ぶ。"""
+        try:
+            candidates = []
+            with open("/proc/net/route") as f:
+                for line in f.readlines()[1:]:
+                    fields = line.strip().split()
+                    if len(fields) < 8:
+                        continue
+                    if fields[1] == "00000000":
+                        metric = int(fields[6])
+                        gw = socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+                        candidates.append((metric, gw))
+            if candidates:
+                return min(candidates, key=lambda x: x[0])[1]
+        except Exception as e:
+            self.get_logger().warn(f"[MQTT diag] failed to read default gateway: {e}")
+        return None
+
+    def _ping(self, host, timeout=1):
+        if not host:
+            return None
+        try:
+            result = subprocess.run(
+                ["ping", "-c", "1", "-W", str(timeout), host],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 1,
+            )
+            return result.returncode == 0
+        except Exception as e:
+            self.get_logger().warn(f"[MQTT diag] ping to {host} failed: {e}")
+            return False
+
+    def _check_broker_tcp(self, host, port, timeout=2):
+        """TCP接続確認。DNS解決失敗(自分側のリゾルバ/経路の問題)とTCP接続失敗
+        (ブローカー側/ファイアウォールの可能性)を区別してログに残す。"""
+        if not host or not port:
+            return None
+        try:
+            addr = socket.gethostbyname(host)
+        except Exception as e:
+            self.get_logger().warn(f"[MQTT diag] DNS resolve failed for {host}: {e}")
+            return False
+        try:
+            with socket.create_connection((addr, int(port)), timeout=timeout):
+                return True
+        except Exception as e:
+            self.get_logger().warn(f"[MQTT diag] tcp connect to {addr}:{port} failed: {e}")
+            return False
+
+    def _diagnose_disconnect(self):
+        """切断検知時に、電波(ローカル回線)/ネットワーク(先方)/マシン(処理遅延)のどこに問題がありそうかを切り分けてログに残す"""
+        gateway = self._get_default_gateway()
+        gateway_ok = self._ping(gateway)
+        broker_ok = self._check_broker_tcp(self.broker_host, self.broker_port)
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except Exception:
+            load1 = load5 = load15 = -1.0
+        cpu_count = os.cpu_count() or 1
+
+        self.get_logger().warn(
+            f"[MQTT diag] gateway={gateway} gateway_ok={gateway_ok} "
+            f"broker={self.broker_host}:{self.broker_port} broker_tcp_ok={broker_ok} "
+            f"load1={load1:.2f} load5={load5:.2f} cpu_count={cpu_count} "
+            f"timer_delay={self._last_timer_delay:.2f}s"
+        )
+
+        if gateway_ok is False:
+            verdict = "電波(ローカル回線)不良の可能性"
+        elif broker_ok is False:
+            verdict = "ネットワーク(先方/回線)不良の可能性"
+        elif self._last_timer_delay > 1.0 or load1 > cpu_count:
+            verdict = "マシン(処理遅延/高負荷)の可能性"
+        else:
+            verdict = "原因不明(ブローカー/セッション側の可能性)"
+        self.get_logger().warn(f"[MQTT diag] verdict: {verdict}")
+
     def timer_cb(self):
         global mqtt_client
+        now = time.time()
+        if self._last_timer_ts is not None:
+            self._last_timer_delay = now - self._last_timer_ts - self._timer_period
+        self._last_timer_ts = now
+
         if self.prev_hb:
             if (datetime.datetime.fromtimestamp(time.time()) - self.prev_hb).seconds < 5:
                 self.get_logger().info("---OK---")
@@ -57,6 +149,7 @@ class MqttNode(Node):
             elif ( time.time() - self.prev_reconnect ) >= 5:
                 self.get_logger().warn("Reconnecting MQTT...")
                 self.get_logger().warn(f"last mims_hb is {(datetime.datetime.fromtimestamp(time.time()) - self.prev_hb)} ago")
+                threading.Thread(target=self._diagnose_disconnect, daemon=True).start()
                 self.reset_bridges('mqtt_to_ros')
                 try:
                     if mqtt_client.is_connected():
@@ -151,6 +244,9 @@ def mqtt_bridge_node(spin=True):
 
     for key in conn_params.keys():
         conn_params.update({key: conn_params[key].value})
+
+    mqtt_node.broker_host = conn_params.get("host")
+    mqtt_node.broker_port = conn_params.get("port")
 
     mqtt_private_path = mqtt_node.get_parameter("mqtt.private_path").value
 
