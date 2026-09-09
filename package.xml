@@ -15,6 +15,8 @@
   <exec_depend>python3-msgpack</exec_depend>
   <exec_depend>python3-paho-mqtt</exec_depend>
   <exec_depend>python3-pymongo</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rosbridge_library</exec_depend>
 
