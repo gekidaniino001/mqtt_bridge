@@ -9,6 +9,7 @@
 #   あわせてデフォルトゲートウェイを切り替える:
 #     install   : Haneda-Lab-WIFI を唯一のデフォゲにする(有線/LTE等の他の接続は never-default にする。元の値は退避)
 #     uninstall : Haneda-Lab-WIFI をデフォゲから外し、他の接続は退避しておいた元の値に戻す
+#                 その結果デフォゲが無くなった場合は、今つながっている接続から選んでデフォゲにできる
 #
 # 使い方 (すべて sudo で実行):
 #   sudo ./haneda_roaming.sh install      # dispatcher を設置し、デフォゲ切替も行い、今の接続にも即反映
@@ -269,10 +270,59 @@ do_uninstall() {
     logger -t "$LOG_TAG" "uninstalled (reconnect=$reconnect)"
 }
 
+# デフォゲが無ければ警告し、今つながっている接続からデフォゲにするものを選ばせる
 warn_if_no_default() {
-    if [ -z "$(ip route show default)" ]; then
-        echo "注意: 現在デフォルトゲートウェイがありません(Wi-Fi以外の回線が未接続の可能性)。インターネットに出られない状態です"
+    local i
+    # 復元・再接続した接続のルートが入るまで少し待つ(最大5秒)
+    for i in $(seq 1 10); do
+        [ -n "$(ip route show default)" ] && return 0
+        sleep 0.5
+    done
+    echo "注意: 現在デフォルトゲートウェイがありません。インターネットに出られない状態です"
+    choose_default_gw
+}
+
+choose_default_gw() {
+    local uuids=() labels=() uuid type dev i ans
+    # 対話端末でない(パイプやcron等)ときは選ばせない
+    if [ ! -t 0 ]; then
+        echo "対話端末ではないため、デフォゲの選択はスキップしました"
+        return 0
     fi
+    while IFS=: read -r uuid type dev; do
+        # docker等のbridgeやloopback、VPNはデフォゲ候補にしない
+        case "$type" in bridge|loopback|tun|vpn|wireguard) continue ;; esac
+        uuids+=("$uuid")
+        labels+=("$(profile_name "$uuid") ($dev, $type)")
+    done < <(nmcli -g UUID,TYPE,DEVICE con show --active)
+    if [ ${#uuids[@]} -eq 0 ]; then
+        echo "デフォゲにできる接続がありません(SIMや有線が接続されているか確認してください)"
+        return 0
+    fi
+    echo "今つながっている接続から、デフォゲにするものを選んでください:"
+    for i in "${!uuids[@]}"; do
+        echo "  $((i + 1))) ${labels[$i]}"
+    done
+    echo "  0) 何もしない"
+    read -r -p "番号: " ans
+    if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -eq 0 ] || [ "$ans" -gt ${#uuids[@]} ]; then
+        echo "何も変更しませんでした"
+        return 0
+    fi
+    uuid=${uuids[$((ans - 1))]}
+    nmcli con modify "$uuid" ipv4.never-default no ipv6.never-default no
+    reapply_profile "$uuid"
+    # reapply で反映されない場合は張り直す(その接続は数秒切れる)
+    for i in $(seq 1 10); do
+        [ -n "$(ip route show default)" ] && break
+        sleep 0.5
+    done
+    if [ -z "$(ip route show default)" ]; then
+        nmcli con up "$uuid" >/dev/null || true
+    fi
+    echo "デフォゲにしました: ${labels[$((ans - 1))]}"
+    echo "デフォゲ: $(ip route show default | tr '\n' ' ')"
+    logger -t "$LOG_TAG" "default gateway chosen: $(profile_name "$uuid")"
 }
 
 case "${1:-}" in
@@ -301,7 +351,7 @@ case "${1:-}" in
         do_uninstall "${2:-}"
         ;;
     *)
-        sed -n '2,19p' "$0"
+        sed -n '2,20p' "$0"
         exit 1
         ;;
 esac
