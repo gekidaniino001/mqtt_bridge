@@ -22,7 +22,8 @@ set -euo pipefail
 # ---- 設定値 (2026-09-24 羽田T1北サテライト 8周目の設定) ----
 # Wi-Fiのインターフェース名。PCごとに番号が違うので、空なら自動検出(最初に見つかったWi-Fiデバイス)
 IFACE=""
-CONN_ID="Haneda-Lab-WIFI"
+# 対象のSSID。接続プロファイル名はPCごとに違う(例: "Haneda-Lab-WIFI 1")ので、プロファイルはSSIDで探す
+SSID="Haneda-Lab-WIFI"
 if [ -z "$IFACE" ]; then
     IFACE=$(nmcli -g DEVICE,TYPE device | sed -n 's/:wifi$//p' | head -1)
     if [ -z "$IFACE" ]; then
@@ -55,19 +56,20 @@ write_hook() {
 #!/bin/bash
 # haneda_roaming.sh が生成 ($(date '+%Y-%m-%d %H:%M:%S'))。削除は haneda_roaming.sh uninstall で行う
 IFACE="$IFACE"
-CONN_ID="$CONN_ID"
+SSID="$SSID"
 BGSCAN="$BGSCAN"
 SCAN_FREQ="$SCAN_FREQ"
 LOG_TAG="$LOG_TAG"
 
 [ "\$1" = "\$IFACE" ] || exit 0
 case "\$2" in up|reapply) ;; *) exit 0 ;; esac
-[ "\${CONNECTION_ID:-}" = "\$CONN_ID" ] || exit 0
 
-# wpa_supplicant 側のネットワークIDを取得(接続完了直後に取れない場合に備えて最大10秒待つ)
+# wpa_supplicant 側のネットワークIDとSSIDを取得(接続完了直後に取れない場合に備えて最大10秒待つ)
+# プロファイル名はPCごとに違うので、対象かどうかはSSIDで判定する
 id=""
 for _ in \$(seq 1 20); do
-    id=\$(wpa_cli -i "\$IFACE" status 2>/dev/null | sed -n 's/^id=//p')
+    st=\$(wpa_cli -i "\$IFACE" status 2>/dev/null)
+    id=\$(echo "\$st" | sed -n 's/^id=//p')
     [ -n "\$id" ] && break
     sleep 0.5
 done
@@ -75,6 +77,7 @@ if [ -z "\$id" ]; then
     logger -t "\$LOG_TAG" "network id not found on \$IFACE; skip"
     exit 0
 fi
+[ "\$(echo "\$st" | sed -n 's/^ssid=//p')" = "\$SSID" ] || exit 0
 
 wpa_cli -i "\$IFACE" set_network "\$id" scan_freq "\$SCAN_FREQ" >/dev/null
 wpa_cli -i "\$IFACE" set_network "\$id" bgscan "\"\$BGSCAN\"" >/dev/null
@@ -84,9 +87,22 @@ EOF
     chmod 755 "$HOOK"
 }
 
-# Haneda-Lab-WIFI の接続プロファイルがこのPCにあるか(一度も接続していないPCには無い)
+# SSID が Haneda-Lab-WIFI の接続プロファイルのUUID一覧(同じSSIDのプロファイルが複数あれば全部)
+ssid_profiles() {
+    local uuid type
+    nmcli -g UUID,TYPE con show | while IFS=: read -r uuid type; do
+        [ "$type" = "802-11-wireless" ] || continue
+        [ "$(nmcli -g 802-11-wireless.ssid con show "$uuid")" = "$SSID" ] && echo "$uuid"
+    done
+}
+
+# 一度も接続していないPCにはプロファイルが無い
 has_profile() {
-    nmcli -g connection.id con show id "$CONN_ID" >/dev/null 2>&1
+    [ -n "$(ssid_profiles)" ]
+}
+
+profile_name() {
+    nmcli -g connection.id con show "$1"
 }
 
 current_id() {
@@ -103,8 +119,8 @@ apply_now() {
     local id ssid tmp_bgscan
     id=$(current_id)
     ssid=$(current_ssid)
-    if [ -z "$id" ] || [ "$ssid" != "$CONN_ID" ]; then
-        echo "今は $CONN_ID に接続していないため、即時反映はスキップしました (ssid='${ssid}')"
+    if [ -z "$id" ] || [ "$ssid" != "$SSID" ]; then
+        echo "今は $SSID に接続していないため、即時反映はスキップしました (ssid='${ssid}')"
         return 0
     fi
     tmp_bgscan="${BGSCAN%:*}:$(( ${BGSCAN##*:} + 1 ))"
@@ -148,22 +164,27 @@ route_install() {
         fi
         echo "デフォゲ対象外にしました: $(nmcli -g connection.id con show "$uuid")"
     done
-    if [ "$(nmcli -g ipv4.never-default con show id "$CONN_ID")" != "no" ]; then
-        nmcli con modify id "$CONN_ID" ipv4.never-default no ipv6.never-default no
-        reapply_profile "$CONN_ID"
-    fi
-    echo "$CONN_ID を唯一のデフォゲにしました"
-    logger -t "$LOG_TAG" "default gateway: $CONN_ID only"
+    for uuid in $(ssid_profiles); do
+        if [ "$(nmcli -g ipv4.never-default con show "$uuid")" != "no" ]; then
+            nmcli con modify "$uuid" ipv4.never-default no ipv6.never-default no
+            reapply_profile "$uuid"
+        fi
+        echo "デフォゲにしました: $(profile_name "$uuid")"
+    done
+    echo "$SSID を唯一のデフォゲにしました"
+    logger -t "$LOG_TAG" "default gateway: $SSID only"
 }
 
 route_uninstall() {
     local uuid v4 v6
     # プロファイルが無くても、他の接続の復元は必ず行う
     if has_profile; then
-        nmcli con modify id "$CONN_ID" ipv4.never-default yes ipv6.never-default yes
-        echo "$CONN_ID をデフォゲから外しました"
+        for uuid in $(ssid_profiles); do
+            nmcli con modify "$uuid" ipv4.never-default yes ipv6.never-default yes
+            echo "デフォゲから外しました: $(profile_name "$uuid")"
+        done
     else
-        echo "$CONN_ID の接続プロファイルが無いため、Wi-Fi側の設定変更はスキップしました"
+        echo "$SSID の接続プロファイルが無いため、Wi-Fi側の設定変更はスキップしました"
     fi
     if [ -f "$ROUTE_BACKUP" ]; then
         while read -r uuid v4 v6; do
@@ -177,16 +198,18 @@ route_uninstall() {
     else
         echo "退避ファイルが無いため、他の接続のデフォゲ設定は変更していません"
     fi
-    logger -t "$LOG_TAG" "default gateway: $CONN_ID removed, others restored"
+    logger -t "$LOG_TAG" "default gateway: $SSID removed, others restored"
 }
 
 show_status() {
     local id uuid
     echo "デフォゲ   : $(ip route show default | tr '\n' ' ')"
     if has_profile; then
-        echo "             $CONN_ID ipv4.never-default=$(nmcli -g ipv4.never-default con show id "$CONN_ID")"
+        for uuid in $(ssid_profiles); do
+            echo "             $(profile_name "$uuid") ipv4.never-default=$(nmcli -g ipv4.never-default con show "$uuid")"
+        done
     else
-        echo "             $CONN_ID の接続プロファイルなし"
+        echo "             $SSID の接続プロファイルなし"
     fi
     for uuid in $(other_gw_profiles); do
         echo "             $(nmcli -g connection.id con show "$uuid") ipv4.never-default=$(nmcli -g ipv4.never-default con show "$uuid")"
@@ -218,8 +241,8 @@ do_uninstall() {
         echo "dispatcher は設置されていませんでした"
     fi
     route_uninstall
-    if [ "$(current_ssid)" != "$CONN_ID" ]; then
-        echo "今は $CONN_ID に接続していないため、次回接続時から NM 既定値になります"
+    if [ "$(current_ssid)" != "$SSID" ]; then
+        echo "今は $SSID に接続していないため、次回接続時から NM 既定値になります"
         warn_if_no_default
         logger -t "$LOG_TAG" "uninstalled (not connected)"
         return 0
@@ -228,7 +251,8 @@ do_uninstall() {
         # 再接続すると NM が wpa_supplicant のネットワーク設定を作り直すので、確実に既定値へ戻る(数秒の瞬断あり)
         # デフォゲから外す設定もこの再接続で反映される
         echo "Wi-Fi を再接続して NM 既定値に戻します(数秒切れます)..."
-        nmcli con up id "$CONN_ID" >/dev/null
+        # 今つながっているプロファイル(名前はPCごとに違う)を張り直す
+        nmcli con up "$(nmcli -g GENERAL.CONNECTION device show "$IFACE")" >/dev/null
         echo "再接続しました"
     else
         # デフォゲから外す設定を再接続なしで反映
@@ -237,7 +261,7 @@ do_uninstall() {
         wpa_cli -i "$IFACE" set_network "$id" bgscan "\"$NM_DEFAULT_BGSCAN\"" >/dev/null
         # scan_freq を空にして全チャンネルスキャンに戻す。失敗した場合は次回の再接続で戻る
         if ! wpa_cli -i "$IFACE" set_network "$id" scan_freq "" | grep -q OK; then
-            echo "scan_freq の解除に失敗しました。次回の再接続(または nmcli con up id $CONN_ID)で元に戻ります"
+            echo "scan_freq の解除に失敗しました。次回の再接続で元に戻ります"
         fi
         echo "再接続せずに bgscan=$NM_DEFAULT_BGSCAN に戻しました"
     fi
@@ -256,7 +280,7 @@ case "${1:-}" in
         require_root "$@"
         # プロファイルが無いと途中で失敗し、他の接続だけデフォゲから外れた状態になるので、何も変更せずに止める
         if ! has_profile; then
-            echo "$CONN_ID の接続プロファイルがありません。先に一度 $CONN_ID に接続してから install してください" >&2
+            echo "$SSID の接続プロファイルがありません。先に一度 $SSID に接続してから install してください" >&2
             exit 1
         fi
         route_install
