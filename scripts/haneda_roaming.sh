@@ -84,6 +84,11 @@ EOF
     chmod 755 "$HOOK"
 }
 
+# Haneda-Lab-WIFI の接続プロファイルがこのPCにあるか(一度も接続していないPCには無い)
+has_profile() {
+    nmcli -g connection.id con show id "$CONN_ID" >/dev/null 2>&1
+}
+
 current_id() {
     wpa_cli -i "$IFACE" status 2>/dev/null | sed -n 's/^id=//p'
 }
@@ -153,8 +158,13 @@ route_install() {
 
 route_uninstall() {
     local uuid v4 v6
-    nmcli con modify id "$CONN_ID" ipv4.never-default yes ipv6.never-default yes
-    echo "$CONN_ID をデフォゲから外しました"
+    # プロファイルが無くても、他の接続の復元は必ず行う
+    if has_profile; then
+        nmcli con modify id "$CONN_ID" ipv4.never-default yes ipv6.never-default yes
+        echo "$CONN_ID をデフォゲから外しました"
+    else
+        echo "$CONN_ID の接続プロファイルが無いため、Wi-Fi側の設定変更はスキップしました"
+    fi
     if [ -f "$ROUTE_BACKUP" ]; then
         while read -r uuid v4 v6; do
             # 退避後に削除されたプロファイルは飛ばす
@@ -173,7 +183,11 @@ route_uninstall() {
 show_status() {
     local id uuid
     echo "デフォゲ   : $(ip route show default | tr '\n' ' ')"
-    echo "             $CONN_ID ipv4.never-default=$(nmcli -g ipv4.never-default con show id "$CONN_ID")"
+    if has_profile; then
+        echo "             $CONN_ID ipv4.never-default=$(nmcli -g ipv4.never-default con show id "$CONN_ID")"
+    else
+        echo "             $CONN_ID の接続プロファイルなし"
+    fi
     for uuid in $(other_gw_profiles); do
         echo "             $(nmcli -g connection.id con show "$uuid") ipv4.never-default=$(nmcli -g ipv4.never-default con show "$uuid")"
     done
@@ -240,6 +254,11 @@ warn_if_no_default() {
 case "${1:-}" in
     install)
         require_root "$@"
+        # プロファイルが無いと途中で失敗し、他の接続だけデフォゲから外れた状態になるので、何も変更せずに止める
+        if ! has_profile; then
+            echo "$CONN_ID の接続プロファイルがありません。先に一度 $CONN_ID に接続してから install してください" >&2
+            exit 1
+        fi
         route_install
         write_hook
         echo "dispatcher を設置しました ($HOOK)"
